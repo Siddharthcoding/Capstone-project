@@ -1,28 +1,28 @@
+import os
 import math
-import datetime
 from typing import TypedDict, List
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 import chromadb
+from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # DOMAIN METADATA
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 
-DOMAIN_NAME        = "Physics Study Buddy"
+DOMAIN_NAME = "Physics Study Buddy"
 DOMAIN_DESCRIPTION = (
     "A 24/7 intelligent study assistant for B.Tech students that explains "
-    "Physics concepts faithfully from the course syllabus without hallucinating "
-    "formulas, and solves numerical problems step-by-step using a built-in "
-    "scientific calculator."
+    "Physics concepts faithfully and solves numericals step-by-step."
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# KNOWLEDGE BASE — 12 documents, one topic each, 150-400 words each
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# DOCUMENTS
+# ─────────────────────────────────────────────────────────
 
 DOCUMENTS = [
     {
@@ -334,63 +334,37 @@ Capillary rise: h = 2*sigma*cos(theta) / (rho*g*r), theta = contact angle.""",
     },
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STATE
-# ─────────────────────────────────────────────────────────────────────────────
-
 class CapstoneState(TypedDict):
-    question:      str          # current user question
-
-    messages:      List[dict]   # sliding window — last 6 messages (3 turns)
-
-    route:         str          # "retrieve" | "memory_only" | "tool"
-
-    retrieved:     str          # formatted ChromaDB context string
-    sources:       List[str]    # topic names of retrieved chunks
-
-    tool_result:   str          # output of the scientific calculator
-
-    answer:        str          # final LLM response
-
-    faithfulness:  float        # eval score 0.0-1.0
-    eval_retries:  int          # retry counter
-
-    student_name:  str          
-    quiz_score:    int          
-
-# ─────────────────────────────────────────────────────────────────────────────
-# THRESHOLDS
-# ─────────────────────────────────────────────────────────────────────────────
+    question: str
+    messages: List[dict]
+    route: str
+    retrieved: str
+    sources: List[str]
+    tool_result: str
+    answer: str
+    faithfulness: float
+    eval_retries: int
+    student_name: str
 
 FAITHFULNESS_THRESHOLD = 0.7
-MAX_EVAL_RETRIES       = 2
+MAX_EVAL_RETRIES = 2
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# KNOWLEDGE BASE BUILDER
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_knowledge_base():
-    """
-    Builds a persistent ChromaDB collection (fixes 'no such table' error)
-    """
-    print("Loading embedding model (all-MiniLM-L6-v2)...")
+    print("Loading embedding model...")
     embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-    client = chromadb.Client(
-        chromadb.config.Settings(
-            persist_directory="./chroma_db",
-            anonymized_telemetry=False   
-        )
+    client = chromadb.PersistentClient(
+        path="./chroma_db",
+        settings=Settings(anonymized_telemetry=False),
     )
 
-    try:
-        collection = client.get_collection("capstone_kb")
-    except Exception:
-        collection = client.create_collection("capstone_kb")
+    collection = client.get_or_create_collection(name="capstone_kb")
 
-        texts      = [d["text"] for d in DOCUMENTS]
-        ids        = [d["id"]   for d in DOCUMENTS]
+    if collection.count() == 0:
+        print("Creating new collection and adding documents...")
+        texts = [d["text"] for d in DOCUMENTS]
+        ids = [d["id"] for d in DOCUMENTS]
         embeddings = embedder.encode(texts).tolist()
 
         collection.add(
@@ -399,35 +373,31 @@ def build_knowledge_base():
             ids=ids,
             metadatas=[{"topic": d["topic"]} for d in DOCUMENTS],
         )
-
-        client.persist() 
+    else:
+        print("Loaded existing collection")
 
     return embedder, collection
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NODE FACTORIES
-# ─────────────────────────────────────────────────────────────────────────────
 
 def make_memory_node():
-    """
-    Appends the current question to history, applies the 6-message sliding
-    window, and extracts the student's name if they introduce themselves.
-    """
-    def memory_node(state: CapstoneState) -> dict:
-        msgs = state.get("messages", [])
-        msgs = msgs + [{"role": "user", "content": state["question"]}]
-        if len(msgs) > 6:           
-            msgs = msgs[-6:]
+    def memory_node(state: CapstoneState):
+        msgs = list(state.get("messages", []))
+
+        if not msgs or msgs[-1].get("role") != "user" or msgs[-1].get("content") != state["question"]:
+            msgs.append({"role": "user", "content": state["question"]})
+
+        msgs = msgs[-6:]
 
         student_name = state.get("student_name", "")
-        q_lower = state["question"].lower()
+        q = state["question"].lower()
         for phrase in ["my name is ", "i am ", "i'm ", "call me "]:
-            if phrase in q_lower:
-                idx = q_lower.find(phrase) + len(phrase)
-                candidate = state["question"][idx:].split()[0].strip(".,!?")
-                if candidate.isalpha() and 2 <= len(candidate) <= 20:
-                    student_name = candidate.title()
-                    break
+            if phrase in q:
+                after = state["question"][q.find(phrase) + len(phrase):].strip()
+                if after:
+                    candidate = after.split()[0].strip(".,!?")
+                    if candidate.isalpha() and 2 <= len(candidate) <= 20:
+                        student_name = candidate.title()
+                        break
 
         return {"messages": msgs, "student_name": student_name}
 
@@ -435,147 +405,119 @@ def make_memory_node():
 
 
 def make_router_node(llm):
-    """
-    Routes to: retrieve (KB look-up) | tool (calculator) | memory_only (follow-up).
-    """
-    def router_node(state: CapstoneState) -> dict:
-        question = state["question"]
-        messages = state.get("messages", [])
-        recent   = "; ".join(
-            f"{m['role']}: {m['content'][:60]}" for m in messages[-3:-1]
-        ) or "none"
+    def router_node(state: CapstoneState):
+        q = state["question"].strip().lower()
 
-        prompt = f"""You are a router for a Physics Study Buddy chatbot for B.Tech students.
+        if any(word in q for word in ["calculate", "compute", "evaluate", "find the value"]):
+            return {"route": "tool"}
 
-Available options:
-- retrieve   : search the physics knowledge base — use for concept questions,
-               definitions, laws, formulas, derivations, or topic comparisons
-- tool       : use the scientific calculator — use ONLY when the student explicitly asks
-               to calculate a numerical value (keywords: "calculate", "find the value",
-               "compute", "evaluate", "what is sin(30)", or when numbers are substituted into a formula)
-- memory_only: answer from conversation history — use for follow-ups like
-               "what did you just say?", "repeat that", "can you elaborate on that?"
+        if len(q.split()) < 5:
+            return {"route": "memory_only"}
 
-Recent conversation: {recent}
-Current question: {question}
-
-Reply with ONLY one word: retrieve / memory_only / tool"""
-
-        decision = llm.invoke(prompt).content.strip().lower()
-        if "memory" in decision:    decision = "memory_only"
-        elif "tool" in decision:    decision = "tool"
-        else:                       decision = "retrieve"
-
-        print(f"  [router] -> {decision}")
-        return {"route": decision}
+        return {"route": "retrieve"}
 
     return router_node
 
 
 def make_retrieval_node(embedder, collection):
-    """
-    Queries for top-3 relevant physics chunks and formats them with [Topic] labels.
-    """
-    def retrieval_node(state: CapstoneState) -> dict:
-        q_emb   = embedder.encode([state["question"]]).tolist()
-        results = collection.query(query_embeddings=q_emb, n_results=3)
-        chunks  = results["documents"][0]
-        topics  = [m["topic"] for m in results["metadatas"][0]]
-        context = "\n\n---\n\n".join(
-            f"[{topics[i]}]\n{chunks[i]}" for i in range(len(chunks))
-        )
-        return {"retrieved": context, "sources": topics}
+    def retrieval_node(state: CapstoneState):
+        try:
+            q_emb = embedder.encode([state["question"]]).tolist()
+            results = collection.query(query_embeddings=q_emb, n_results=3)
+
+            chunks = results["documents"][0] if results.get("documents") else []
+            metadatas = results["metadatas"][0] if results.get("metadatas") else []
+
+            if not chunks:
+                return {"retrieved": "", "sources": []}
+
+            topics = [m.get("topic", "Unknown") for m in metadatas]
+            context = "\n\n---\n\n".join(
+                f"[{topics[i]}]\n{chunks[i]}" for i in range(len(chunks))
+            )
+            return {"retrieved": context, "sources": topics}
+
+        except Exception as e:
+            print("Retrieval error:", e)
+            return {"retrieved": "", "sources": []}
 
     return retrieval_node
 
 
-def skip_retrieval_node(state: CapstoneState) -> dict:
-    """
-    Used for the memory_only route.
-    """
+def skip_retrieval_node(state):
     return {"retrieved": "", "sources": []}
 
 
-def tool_node(state: CapstoneState) -> dict:
-    """
-    Scientific calculator — safe eval with whitelisted math functions and
-    physics constants. NEVER raises exceptions; returns error strings instead.
-    """
-    question = state["question"]
-
-    safe_ns = {
+def tool_node(state):
+    safe = {
         "__builtins__": {},
-        "sin":   lambda x: math.sin(math.radians(x)),
-        "cos":   lambda x: math.cos(math.radians(x)),
-        "tan":   lambda x: math.tan(math.radians(x)),
-        "asin":  lambda x: math.degrees(math.asin(x)),
-        "acos":  lambda x: math.degrees(math.acos(x)),
-        "atan":  lambda x: math.degrees(math.atan(x)),
-        "sqrt":  math.sqrt,
-        "log":   math.log10,
-        "ln":    math.log,
-        "exp":   math.exp,
-        "abs":   abs,
-        "pi":    math.pi,
-        "e":     math.e,
-        "G":     6.674e-11,
-        "h":     6.626e-34,
-        "c":     3e8,
-        "k":     9e9,
-        "g":     9.8,
-        "R":     8.314,
-        "NA":    6.022e23,
-        "mu0":   4 * math.pi * 1e-7,
-        "eps0":  8.85e-12,
+        "sqrt": math.sqrt,
+        "pi": math.pi,
+        "e": math.e,
+        "g": 9.8,
+        "G": 6.674e-11,
+        "h": 6.626e-34,
+        "c": 3e8,
+        "k": 9e9,
+        "R": 8.314,
+        "NA": 6.022e23,
+        "mu0": 4 * math.pi * 1e-7,
+        "eps0": 8.85e-12,
+        "sin": lambda x: math.sin(math.radians(x)),
+        "cos": lambda x: math.cos(math.radians(x)),
+        "tan": lambda x: math.tan(math.radians(x)),
+        "asin": lambda x: math.degrees(math.asin(x)),
+        "acos": lambda x: math.degrees(math.acos(x)),
+        "atan": lambda x: math.degrees(math.atan(x)),
+        "log": math.log10,
+        "ln": math.log,
+        "exp": math.exp,
+        "abs": abs,
     }
 
     try:
-        expr = question
-        for prefix in ["calculate ", "compute ", "evaluate ", "find ",
-                        "what is ", "solve ", "determine ", "what's "]:
+        expr = state["question"].strip()
+        for prefix in [
+            "calculate ", "compute ", "evaluate ", "find ",
+            "what is ", "solve ", "determine ", "what's "
+        ]:
             if expr.lower().startswith(prefix):
                 expr = expr[len(prefix):]
                 break
-        expr = expr.strip().rstrip("?.")
 
-        result = eval(expr, safe_ns, {}) 
+        expr = expr.strip().rstrip("?.")
+        result = eval(expr, safe, {})
 
         if isinstance(result, float):
-            formatted = (f"{result:.4e}" if (abs(result) < 1e-3 or abs(result) > 1e6)
-                         else f"{result:.6g}")
+            formatted = f"{result:.4e}" if (abs(result) < 1e-3 or abs(result) > 1e6) else f"{result:.6g}"
         else:
             formatted = str(result)
 
         tool_result = (
             f"Calculator result: {expr} = {formatted}\n"
-            f"(Constants available: G={safe_ns['G']}, h={safe_ns['h']}, "
-            f"c={safe_ns['c']}, g={safe_ns['g']}, k={safe_ns['k']}, R={safe_ns['R']})"
+            f"(Constants available: G={safe['G']}, h={safe['h']}, c={safe['c']}, "
+            f"g={safe['g']}, k={safe['k']}, R={safe['R']}, NA={safe['NA']})"
         )
 
     except ZeroDivisionError:
         tool_result = "Calculator error: division by zero — please check your expression."
     except Exception as ex:
         tool_result = (
-            f"Calculator could not evaluate that expression. "
-            f"Please write it clearly, e.g. 'calculate sqrt(2*g*10)' or "
-            f"'find 9e9 * 1e-6 * 2e-6 / 0.1**2'. (Error: {ex})"
+            "Calculator could not evaluate that expression. "
+            "Please write it clearly, e.g. 'calculate sqrt(2*g*10)' or "
+            "'find 9e9 * 1e-6 * 2e-6 / 0.1**2'. "
+            f"(Error: {ex})"
         )
 
-    print(f"  [tool] {tool_result[:100]}")
     return {"tool_result": tool_result}
 
 
 def make_answer_node(llm):
-    """
-    Returns answer_node bound to the provided LLM.
-    Combines KB context + calculator result into a grounded physics explanation.
-    Strict grounding rule: formulas must come from the context, not LLM training data.
-    """
-    def answer_node(state: CapstoneState) -> dict:
-        question     = state["question"]
-        retrieved    = state.get("retrieved", "")
-        tool_result  = state.get("tool_result", "")
-        messages     = state.get("messages", [])
+    def generate_answer_node(state: CapstoneState):
+        question = state["question"]
+        retrieved = state.get("retrieved", "")
+        tool_result = state.get("tool_result", "")
+        messages = state.get("messages", [])
         eval_retries = state.get("eval_retries", 0)
         student_name = state.get("student_name", "")
 
@@ -619,24 +561,21 @@ STRICT RULES:
 
         lc_msgs = [SystemMessage(content=system_content)]
         for msg in messages[:-1]:
-            lc_msgs.append(
-                HumanMessage(content=msg["content"]) if msg["role"] == "user"
-                else AIMessage(content=msg["content"])
-            )
+            if msg["role"] == "user":
+                lc_msgs.append(HumanMessage(content=msg["content"]))
+            else:
+                lc_msgs.append(AIMessage(content=msg["content"]))
         lc_msgs.append(HumanMessage(content=question))
 
         response = llm.invoke(lc_msgs)
         return {"answer": response.content}
 
-    return answer_node
+    return generate_answer_node
 
 
 def make_eval_node(llm):
-    """
-    Scores faithfulness 0.0-1.0.
-    """
-    def eval_node(state: CapstoneState) -> dict:
-        answer  = state.get("answer", "")
+    def eval_node(state: CapstoneState):
+        answer = state.get("answer", "")
         context = state.get("retrieved", "")[:600]
         retries = state.get("eval_retries", 0)
 
@@ -657,85 +596,68 @@ def make_eval_node(llm):
         except Exception:
             score = 0.5
 
-        gate = "PASS" if score >= FAITHFULNESS_THRESHOLD else "RETRY"
-        print(f"  [eval] faithfulness={score:.2f} -> {gate}")
         return {"faithfulness": score, "eval_retries": retries + 1}
 
     return eval_node
 
 
 def make_save_node():
-    """
-    Appends the assistant's answer to conversation history.
-    """
-    def save_node(state: CapstoneState) -> dict:
-        messages = state.get("messages", [])
-        messages = messages + [{"role": "assistant", "content": state["answer"]}]
-        return {"messages": messages}
+    def save_node(state):
+        msgs = list(state.get("messages", []))
+        msgs.append({"role": "assistant", "content": state["answer"]})
+        return {"messages": msgs}
 
     return save_node
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTING FUNCTIONS 
-# ─────────────────────────────────────────────────────────────────────────────
-
-def route_decision(state: CapstoneState) -> str:
+def route_decision(state):
     route = state.get("route", "retrieve")
-    if route == "tool":         return "tool"
-    if route == "memory_only":  return "skip"
+    if route == "tool":
+        return "tool"
+    if route == "memory_only":
+        return "skip"
     return "retrieve"
 
 
-def eval_decision(state: CapstoneState) -> str:
-    score   = state.get("faithfulness", 1.0)
+def eval_decision(state):
+    score = state.get("faithfulness", 1.0)
     retries = state.get("eval_retries", 0)
     if score >= FAITHFULNESS_THRESHOLD or retries >= MAX_EVAL_RETRIES:
         return "save"
     return "answer"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GRAPH BUILDER
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_graph(llm, embedder, collection):
-    memory_node    = make_memory_node()
-    router_node    = make_router_node(llm)
-    retrieval_node = make_retrieval_node(embedder, collection)
-    answer_node    = make_answer_node(llm)
-    eval_node      = make_eval_node(llm)
-    save_node      = make_save_node()
-
     graph = StateGraph(CapstoneState)
 
-    graph.add_node("memory",   memory_node)
-    graph.add_node("router",   router_node)
-    graph.add_node("retrieve", retrieval_node)
-    graph.add_node("skip",     skip_retrieval_node)
-    graph.add_node("tool",     tool_node)
-    graph.add_node("generate_answer", answer_node) 
-    graph.add_node("eval",     eval_node)
-    graph.add_node("save",     save_node)
+    graph.add_node("memory", make_memory_node())
+    graph.add_node("router", make_router_node(llm))
+    graph.add_node("retrieve", make_retrieval_node(embedder, collection))
+    graph.add_node("skip", skip_retrieval_node)
+    graph.add_node("tool", tool_node)
+    graph.add_node("generate_answer", make_answer_node(llm))
+    graph.add_node("eval", make_eval_node(llm))
+    graph.add_node("save", make_save_node())
 
     graph.set_entry_point("memory")
-    graph.add_edge("memory",   "router")
-    
-    graph.add_edge("retrieve", "generate_answer")
-    graph.add_edge("skip",     "generate_answer")
-    graph.add_edge("tool",     "generate_answer")
-    graph.add_edge("generate_answer", "eval")
-    graph.add_edge("save",     END)
+    graph.add_edge("memory", "router")
 
     graph.add_conditional_edges(
-        "router", route_decision,
+        "router",
+        route_decision,
         {"retrieve": "retrieve", "skip": "skip", "tool": "tool"},
     )
-    
+
+    graph.add_edge("retrieve", "generate_answer")
+    graph.add_edge("skip", "generate_answer")
+    graph.add_edge("tool", "generate_answer")
+    graph.add_edge("generate_answer", "eval")
+
     graph.add_conditional_edges(
-        "eval", eval_decision,
+        "eval",
+        eval_decision,
         {"answer": "generate_answer", "save": "save"},
     )
 
-    app = graph.compile(checkpointer=MemorySaver())
-    return app
+    graph.add_edge("save", END)
+    return graph.compile(checkpointer=MemorySaver())
