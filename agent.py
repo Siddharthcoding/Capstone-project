@@ -372,31 +372,37 @@ MAX_EVAL_RETRIES       = 2
 
 def build_knowledge_base():
     """
-    Loads the SentenceTransformer embedder, builds an in-memory ChromaDB
-    collection from DOCUMENTS, and returns (embedder, collection).
+    Builds a persistent ChromaDB collection (fixes 'no such table' error)
     """
-    print("Loading embedding model (all-MiniLM-L6-v2) — ~90 MB on first run...")
+    print("Loading embedding model (all-MiniLM-L6-v2)...")
     embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-    client = chromadb.Client()
-    try:
-        client.delete_collection("capstone_kb")
-    except Exception:
-        pass
-    collection = client.create_collection("capstone_kb")
-
-    texts      = [d["text"] for d in DOCUMENTS]
-    ids        = [d["id"]   for d in DOCUMENTS]
-    embeddings = embedder.encode(texts).tolist()
-
-    collection.add(
-        documents=texts,
-        embeddings=embeddings,
-        ids=ids,
-        metadatas=[{"topic": d["topic"]} for d in DOCUMENTS],
+    client = chromadb.Client(
+        chromadb.config.Settings(
+            persist_directory="./chroma_db",
+            anonymized_telemetry=False   
+        )
     )
-    return embedder, collection
 
+    try:
+        collection = client.get_collection("capstone_kb")
+    except Exception:
+        collection = client.create_collection("capstone_kb")
+
+        texts      = [d["text"] for d in DOCUMENTS]
+        ids        = [d["id"]   for d in DOCUMENTS]
+        embeddings = embedder.encode(texts).tolist()
+
+        collection.add(
+            documents=texts,
+            embeddings=embeddings,
+            ids=ids,
+            metadatas=[{"topic": d["topic"]} for d in DOCUMENTS],
+        )
+
+        client.persist() 
+
+    return embedder, collection
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NODE FACTORIES
