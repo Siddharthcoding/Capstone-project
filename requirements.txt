@@ -1,0 +1,33 @@
+# ============================================================
+# Physics Study Buddy — Agentic AI Capstone Project
+# Dr. Kanthi Kiran Sirra | Agentic AI Hands-On Course 2026
+# ============================================================
+# Install: pip install -r requirements.txt
+
+# ── LLM & LangChain ─────────────────────────────────────────
+langchain-groq==0.3.2
+langchain-core==0.3.51
+
+# ── LangGraph (agent orchestration) ─────────────────────────
+langgraph==0.3.21
+
+# ── Vector store ────────────────────────────────────────────
+chromadb==0.6.3
+
+# ── Embeddings ───────────────────────────────────────────────
+sentence-transformers==3.4.1
+
+# ── Environment variables ────────────────────────────────────
+python-dotenv==1.0.1
+
+# ── Streamlit UI ─────────────────────────────────────────────
+streamlit==1.43.2
+
+# ── RAGAS evaluation (Part 6) ────────────────────────────────
+# Installs ragas + its peer datasets library together
+ragas==0.2.14
+datasets==3.4.1
+
+# ── Jupyter (to open the notebook) ──────────────────────────
+jupyterlab==4.3.6
+ipykernel==6.29.5
